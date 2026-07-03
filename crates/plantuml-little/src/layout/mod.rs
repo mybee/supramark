@@ -103,8 +103,12 @@ const CLASS_FONT_SIZE: f64 = 14.0;
 /// FontParam.CLASS_ATTRIBUTE = 10pt.
 #[allow(dead_code)] // Java-ported constant for class attribute sizing
 const CLASS_ATTR_FONT_SIZE: f64 = 10.0;
-/// MethodsOrFieldsArea: empty compartment = margin_top(4) + margin_bottom(4).
-const LINE_HEIGHT_PT: f64 = 8.0;
+/// MethodsOrFieldsArea member row height.  Must match the renderer's member
+/// advance (MEMBER_ROW_HEIGHT = SansSerif 14pt ascent+descent) — previously
+/// 8.0 (just the empty-compartment margin), which made legacy-sized entities
+/// (enum/annotation) far too short: members spilled past the box bottom
+/// (issue #37).
+const LINE_HEIGHT_PT: f64 = MEMBER_ROW_HEIGHT;
 /// EntityImageClassHeader.java:150 — withMargin(circledChar, left=4, ...).
 const CIRCLE_LEFT_PAD: f64 = 4.0;
 /// SkinParam.circledCharacterRadius = 17/3+6 = 11. Diameter = 2 * 11 = 22.
@@ -2652,6 +2656,36 @@ mod tests {
         assert!(
             diff > 10.0 && diff < 17.0,
             "height diff {diff} should be between 10 and 17 (name line height minus circle cap)"
+        );
+    }
+
+    // issue #37: enum/annotation entities are sized by estimate_entity_size_legacy,
+    // which used LINE_HEIGHT_PT = 8.0 (the empty-compartment margin, NOT a row
+    // height).  A 3-member enum got a 72px box while members need ~16.3px each,
+    // so they spilled past the bottom.  With LINE_HEIGHT_PT = MEMBER_ROW_HEIGHT
+    // the box must be tall enough to contain all members.
+    #[test]
+    fn enum_entity_height_fits_all_members() {
+        let mut e = empty_entity("OrderStatus");
+        e.kind = EntityKind::Enum;
+        e.members = vec![
+            make_member(None, "NEW", None),
+            make_member(None, "PAID", None),
+            make_member(None, "SHIPPED", None),
+        ];
+        let diagram = empty_diagram();
+        let (_, h) = estimate_entity_size(
+            &diagram,
+            &e,
+            MEMBER_ROW_HEIGHT,
+            CLASS_FONT_SIZE,
+            CLASS_FONT_SIZE,
+        );
+        // 3 members × MEMBER_ROW_HEIGHT(16.297) + header(32) + empty fields(8) +
+        // empty-compartment padding(8) ≈ 97.  The buggy value was 72 (3×8+8+32+8).
+        assert!(
+            h > 90.0,
+            "enum height {h} must fit 3 members (>90, was 72 before the LINE_HEIGHT_PT fix)"
         );
     }
 
