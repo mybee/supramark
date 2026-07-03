@@ -2060,9 +2060,12 @@ pub fn layout_activity(diagram: &ActivityDiagram) -> Result<ActivityLayout> {
                             .fold(0.0_f64, f64::max)
                     })
                     .unwrap_or(0.0);
-                // Total if-block half-width: left_branch_center_to_diamond_center + right
-                let left_half = 10.0 + left_w / 2.0 + diamond.width / 2.0;
-                let right_half = 10.0 + right_w / 2.0 + diamond.width / 2.0;
+                // Branch boxes are placed tight against the diamond's sides
+                // (then right edge = diamond_left - 10; else left edge =
+                // diamond_right + 10), so the half-width from the centreline
+                // out to the outer box edge is diamond/2 + gap + full box width.
+                let left_half = diamond.width / 2.0 + 10.0 + left_w;
+                let right_half = diamond.width / 2.0 + 10.0 + right_w;
                 max_half_w = max_half_w.max(left_half).max(right_half);
             } else {
                 // For no-else blocks, the diamond itself is the widest
@@ -2096,13 +2099,28 @@ pub fn layout_activity(diagram: &ActivityDiagram) -> Result<ActivityLayout> {
             let diamond_left_x = diamond.x;
             let diamond_right_x = diamond.x + diamond.width;
             if die.has_else {
-                // Then branch center = diamond_left - 10
-                let then_cx = diamond_left_x - 10.0;
+                // Place each branch box tight against the diamond so wide
+                // branches don't slide under the diamond or the sibling branch:
+                //   then right edge = diamond_left - 10
+                //   else left edge  = diamond_right + 10
+                // (previously the centres were at diamond_edge ± 10, which let
+                // a wide box overlap the sibling — issue #30.)
+                let then_w = die
+                    .then_branch
+                    .nodes
+                    .iter()
+                    .map(|&i| nodes[i].width)
+                    .fold(0.0_f64, f64::max);
+                let else_w = die
+                    .else_branch
+                    .as_ref()
+                    .map(|b| b.nodes.iter().map(|&i| nodes[i].width).fold(0.0_f64, f64::max))
+                    .unwrap_or(0.0);
+                let then_cx = diamond_left_x - 10.0 - then_w / 2.0;
                 for &node_idx in &die.then_branch.nodes {
                     nodes[node_idx].x = then_cx - nodes[node_idx].width / 2.0;
                 }
-                // Else branch center = diamond_right + 10
-                let else_cx = diamond_right_x + 10.0;
+                let else_cx = diamond_right_x + 10.0 + else_w / 2.0;
                 if let Some(ref else_branch) = die.else_branch {
                     for &node_idx in &else_branch.nodes {
                         nodes[node_idx].x = else_cx - nodes[node_idx].width / 2.0;
@@ -2596,6 +2614,35 @@ pub fn layout_activity(diagram: &ActivityDiagram) -> Result<ActivityLayout> {
                         label: String::new(),
                         points: vec![(last_cx, last_bottom), (last_cx, goto_y)],
                         kind: ActivityEdgeKindLayout::Normal,
+                    });
+                }
+            } else if !die.then_branch.has_break {
+                // 1b. Then-branch merge (normal end): last then node → next flow
+                // node.  Symmetric to the else merge below (step 4) — without
+                // this, a `then` branch that ends normally never connects back
+                // to the merge point, so the diagram is missing the then-side
+                // merge leg (issue #30: 8 lines instead of the official 10).
+                if let (Some(last_idx), Some(next)) =
+                    (die.then_branch.nodes.last(), next_flow_idx)
+                {
+                    let last = &nodes[*last_idx];
+                    let last_cx = last.x + last.width / 2.0;
+                    let last_bottom = last.y + last.height;
+                    let merge_mid_y = die.merge_y + 5.0;
+                    let next_node = &nodes[next];
+                    let next_top = next_node.y;
+                    let next_cx = next_node.x + next_node.width / 2.0;
+                    edges.push(ActivityEdgeLayout {
+                        from_index: *last_idx,
+                        to_index: next,
+                        label: String::new(),
+                        points: vec![
+                            (last_cx, last_bottom),
+                            (last_cx, merge_mid_y),
+                            (next_cx, merge_mid_y),
+                            (next_cx, next_top),
+                        ],
+                        kind: ActivityEdgeKindLayout::IfMerge,
                     });
                 }
             }
@@ -4567,6 +4614,47 @@ mod tests {
         assert_eq!(while_node.kind, ActivityNodeKindLayout::Diamond);
         assert_eq!(end_while_node.kind, ActivityNodeKindLayout::Diamond);
         assert!(while_node.text.contains("count < 10"));
+    }
+
+    // issue #30: a wide `else` branch must not slide under the diamond and
+    // overlap the `then` branch.  Both branch boxes sit flush against the
+    // diamond's sides, so then.right < else.left.
+    #[test]
+    fn if_else_branches_do_not_overlap() {
+        let d = diagram(vec![
+            ActivityEvent::Start,
+            ActivityEvent::If {
+                condition: "cond".into(),
+                then_label: "yes".into(),
+            },
+            ActivityEvent::Action {
+                text: "then action".into(),
+            },
+            ActivityEvent::Else { label: "no".into() },
+            ActivityEvent::Action {
+                text: "else action that is reasonably long".into(),
+            },
+            ActivityEvent::EndIf,
+            ActivityEvent::Stop,
+        ]);
+        let layout = layout_activity(&d).unwrap();
+        let actions: Vec<_> = layout
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, ActivityNodeKindLayout::Action))
+            .collect();
+        assert_eq!(actions.len(), 2, "expected then + else action");
+        let (then_box, else_box) = if actions[0].x <= actions[1].x {
+            (actions[0], actions[1])
+        } else {
+            (actions[1], actions[0])
+        };
+        let then_right = then_box.x + then_box.width;
+        let else_left = else_box.x;
+        assert!(
+            then_right < else_left,
+            "then right edge ({then_right}) must be left of else left edge ({else_left})"
+        );
     }
 
     // 11. Detach marker -------------------------------------------------------
